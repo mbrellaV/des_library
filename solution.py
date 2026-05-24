@@ -5,7 +5,18 @@ import statistics
 import random
 
 
-delta = 1
+delta = 0.5
+v = 1
+n = 0.1
+y = 60
+
+class Cancelation_event(core.Event):
+    def __init__(self, time, order):
+        super().__init__(time)
+        self.order = order
+
+    def execute(self, sim):
+        book.cancel(self.order)
 
 class limit_order:
 
@@ -14,7 +25,7 @@ class limit_order:
         self.id: int = id
         self.arrival_time: float = time
         self.cancelled: bool = False
-        self.price = float = price
+        self.price = price
         self.type = type
 
     def cancel(self) -> None:
@@ -25,7 +36,7 @@ class limit_order:
         return not self.cancelled
 
 
-class book:
+class Book:
 
     def __init__(self, time: float):
         self.time: float = time
@@ -33,16 +44,17 @@ class book:
         self.bids = []
         self.asks = []
         self.next_id = 0
+        self.mid_price = 100
 
 
-    def insert(self, arrival) -> limit_order:
+    def insert(self, arrival) -> limit_order | None:
 
 
         if random.uniform(0, 1) < 0.5:
             self.next_id += 1
             new_price = self.mean_price() - distributions.Exponential(delta).sample()
             if new_price <= 0:
-                return arrival
+                return None
             bid = limit_order(arrival.time, new_price, False, self.next_id)
             self.bids.append(bid)
             return bid
@@ -50,7 +62,7 @@ class book:
             self.next_id += 1
             new_price = self.mean_price() + distributions.Exponential(delta).sample()
             if new_price <= 0:
-                return arrival
+                return None
 
             ask = limit_order(arrival.time, new_price, True, self.next_id)
 
@@ -59,13 +71,15 @@ class book:
             return ask
 
     def best_bid(self) -> None:
-        i=0
-        while i < len(self.bids) - 1:
-            if self.bids[i].cancelled:
-                continue
-            else:
-                best_bid = self.bids[i]
-            i += 1
+
+        if len(self.bids) < 1:
+            return None
+        elif len(self.bids) < 2:
+            return self.bids[0]
+
+        best_bid = self.bids[0]
+
+
         for bid in self.bids:
             if bid.cancelled:
                 continue
@@ -75,13 +89,12 @@ class book:
 
     def best_ask(self) -> None:
 
-        i=0
-        while i < len(self.asks) - 1:
-            if self.asks[i].cancelled:
-                continue
-            else:
-                best_ask = self.asks[i]
-            i += 1
+        if len(self.asks) < 1:
+            return None
+        elif len(self.asks) < 2:
+            return self.asks[0]
+
+        best_ask = self.asks[0]
 
         for ask in self.asks:
             if ask.cancelled:
@@ -90,41 +103,71 @@ class book:
                 best_ask = ask
         return best_ask
 
-    def cancel(self, limit_order: limit_order) -> None:
-        if limit_order.type == False:
+    def cancel(self, order) -> None:
+        if order is None:
+            return  None
+        if order.type == False:
             for bid in self.bids:
-                if bid.id == limit_order.id:
+                if bid.id == order.id:
                     bid.cancel()
                     self.bids.remove(bid)
 
         else:
             for ask in self.asks:
-                if ask.id == limit_order.id:
+                if ask.id == order.id:
                     ask.cancel()
                     self.asks.remove(ask)
 
     def mean_price(self):
-        return 100
+        return self.mid_price
 
+    def contains(self, e):
+        for bid in self.bids:
+            if bid.id == e.id:
+                return True
+        for ask in self.asks:
+            if ask.id == e.id:
+                return True
+        return False
 
-def scan(sim):
-    wait = max(0.0, taken[0] - event.time)
-    taken[0] = event.time + wait + distributions.Exponential(1).sample()
-    s.record(wait)
+def arrival(sim):
+    if random.uniform(0,1) < 0.7:
+        o = book.insert(action)
+        if o is not None:
+            sim.schedule(Cancelation_event(action.time + distributions.Exponential(y).sample(), o))
+    elif random.uniform(0, 1) < 0.5:
+        o = book.best_ask()
+        if o is not None:
+            book.asks.remove(o)
+    else:
+        o = book.best_bid()
+        if o is not None:
+            book.bids.remove(o)
+
+    # wait = max(0.0, taken[0] - event.time)
+    # taken[0] = event.time + wait + distributions.Exponential(1).sample()
+    # s.record(wait)
 
     # event.time += random.expovariate(0.9)
-    event.time += distributions.Exponential(1.1).sample()
-    sim.schedule(event)
+    # event.time += distributions.Exponential(1.1).sample()
+    # sim.schedule(event)
 
-# simulation = core.Simulation()
-taken = [0.0]
+    action.time += distributions.Exponential(1).sample()
+    sim.schedule(action)
+
+
+
 s = statistics.SampleStatistic()
-event = core.Event(0.0)
-event.execute = scan
 
+
+book = Book(0)
+
+action = core.Event(0.0)
+action.execute = arrival
 sim = core.Simulation()
-sim.schedule(event)
-sim.schedule(core.StopSimulation(1000000))
+sim.schedule(action)
+
+sim.schedule(core.StopSimulation(10000))
 
 sim.run()
 
