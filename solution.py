@@ -18,7 +18,7 @@ class Cancelation_event(core.Event):
     def execute(self, sim):
         book.cancel(self.order)
 
-class limit_order:
+class Limit_order:
 
     def __init__(self, time: float, price: float, type: bool, id: int):
         # false buy, true sell
@@ -47,7 +47,7 @@ class Book:
         self.mid_price = 100
 
 
-    def insert(self, arrival) -> limit_order | None:
+    def insert(self, arrival) -> Limit_order | None:
 
 
         if random.uniform(0, 1) < 0.5:
@@ -55,7 +55,7 @@ class Book:
             new_price = self.mean_price() - distributions.Exponential(delta).sample()
             if new_price <= 0:
                 return None
-            bid = limit_order(arrival.time, new_price, False, self.next_id)
+            bid = Limit_order(arrival.time, new_price, False, self.next_id)
             self.bids.append(bid)
             return bid
         else:
@@ -64,7 +64,7 @@ class Book:
             if new_price <= 0:
                 return None
 
-            ask = limit_order(arrival.time, new_price, True, self.next_id)
+            ask = Limit_order(arrival.time, new_price, True, self.next_id)
 
             self.asks.append(ask)
 
@@ -130,6 +130,14 @@ class Book:
                 return True
         return False
 
+    def trade(self, t):
+
+        ran = n * distributions.Exponential(v).sample()
+        self.mid_price += ran if t else -ran
+
+        if abs(self.mid_price - 100) > 5:
+            self.mid_price -= 0.1 * (self.mid_price - 100)
+
 def arrival(sim):
     if random.uniform(0,1) < 0.7:
         o = book.insert(action)
@@ -138,10 +146,12 @@ def arrival(sim):
     elif random.uniform(0, 1) < 0.5:
         o = book.best_ask()
         if o is not None:
+            book.trade(o.type)
             book.asks.remove(o)
     else:
         o = book.best_bid()
         if o is not None:
+            book.trade(o.type)
             book.bids.remove(o)
 
     # wait = max(0.0, taken[0] - event.time)
@@ -151,7 +161,7 @@ def arrival(sim):
     # event.time += random.expovariate(0.9)
     # event.time += distributions.Exponential(1.1).sample()
     # sim.schedule(event)
-
+    print(book.mean_price())
     action.time += distributions.Exponential(1).sample()
     sim.schedule(action)
 
@@ -167,7 +177,7 @@ action.execute = arrival
 sim = core.Simulation()
 sim.schedule(action)
 
-sim.schedule(core.StopSimulation(10000))
+sim.schedule(core.StopSimulation(100))
 
 sim.run()
 
