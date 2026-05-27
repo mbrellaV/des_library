@@ -3,11 +3,12 @@ import core
 import distributions
 import statistics
 import random
+import math
 
 
 delta = 0.5
-v = 1
-n = 0.1
+v = 10
+alpha = 0.02
 y = 60
 
 class Cancelation_event(core.Event):
@@ -49,7 +50,6 @@ class Book:
 
     def insert(self, arrival) -> Limit_order | None:
 
-
         if random.uniform(0, 1) < 0.5:
             self.next_id += 1
             new_price = self.mean_price() - distributions.Exponential(delta).sample()
@@ -57,6 +57,8 @@ class Book:
                 return None
             bid = Limit_order(arrival.time, new_price, False, self.next_id)
             self.bids.append(bid)
+            calc_spread()
+
             return bid
         else:
             self.next_id += 1
@@ -67,6 +69,7 @@ class Book:
             ask = Limit_order(arrival.time, new_price, True, self.next_id)
 
             self.asks.append(ask)
+            calc_spread()
 
             return ask
 
@@ -110,29 +113,23 @@ class Book:
             for bid in self.bids:
                 if bid.id == order.id:
                     bid.cancel()
+                    cancels.increment()
                     self.bids.remove(bid)
 
         else:
             for ask in self.asks:
                 if ask.id == order.id:
                     ask.cancel()
+                    cancels.increment()
                     self.asks.remove(ask)
+        calc_spread()
 
     def mean_price(self):
         return self.mid_price
 
-    def contains(self, e):
-        for bid in self.bids:
-            if bid.id == e.id:
-                return True
-        for ask in self.asks:
-            if ask.id == e.id:
-                return True
-        return False
-
     def trade(self, t):
 
-        ran = n * distributions.Exponential(v).sample()
+        ran = alpha * distributions.Exponential(v).sample()
         self.mid_price += ran if t else -ran
 
         if abs(self.mid_price - 100) > 5:
@@ -146,29 +143,77 @@ def arrival(sim):
     elif random.uniform(0, 1) < 0.5:
         o = book.best_ask()
         if o is not None:
+            f.record(action.time - o.arrival_time)
             book.trade(o.type)
             book.asks.remove(o)
+            calc_spread()
+        else:
+            rejects.increment()
+
     else:
         o = book.best_bid()
         if o is not None:
+            f.record(action.time - o.arrival_time)
             book.trade(o.type)
             book.bids.remove(o)
+            calc_spread()
+        else:
+            rejects.increment()
 
-    # wait = max(0.0, taken[0] - event.time)
-    # taken[0] = event.time + wait + distributions.Exponential(1).sample()
-    # s.record(wait)
-
-    # event.time += random.expovariate(0.9)
-    # event.time += distributions.Exponential(1.1).sample()
-    # sim.schedule(event)
-    print(book.mean_price())
-    action.time += distributions.Exponential(1).sample()
+    l0, lmin, beta = 5, 0.5, 0.05
+    rate = l0 * math.exp(-beta * (book.mid_price - 100)**2) + lmin
+    rate_log.append((action.time, rate))
+    action.time += distributions.Exponential(1 / rate).sample()
     sim.schedule(action)
 
+def calc_spread():
+    b, a = book.best_bid(), book.best_ask()
+    if b is not None and a is not None:
+        spread.update(sim.current_time, a.price - b.price)
+
+batch_len = 200
+warmup = 1000
+batch_f = statistics.SampleStatistic()
+batch_spread = statistics.SampleStatistic()
+batch_cancels = statistics.SampleStatistic()
+batch_rejects = statistics.SampleStatistic()
+previous_sum = 0
+previous_n = 0
+previous_cancels = 0
+previous_rejects = 0
+previous_accumulated = 0
 
 
-s = statistics.SampleStatistic()
+class Batch(core.Event):
+    def execute(self, sim):
+        global previous_sum, previous_n, previous_cancels, previous_rejects, previous_accumulated
 
+        if self.time > warmup:
+
+            n = f.count - previous_n
+            if n > 0:
+                batch_f.record((f.total - previous_sum) / n)
+
+            batch_cancels.record((cancels.value - previous_cancels) / batch_len)
+            batch_rejects.record((rejects.value - previous_rejects) / batch_len)
+            accumulation = spread.accumulated(self.time)
+            batch_spread.record((accumulation - previous_accumulated) / batch_len)
+
+        previous_sum = f.total
+        previous_n = f.count
+        previous_cancels = cancels.value
+        previous_rejects = rejects.value
+        previous_accumulated = spread.accumulated(self.time)
+        sim.schedule(Batch(self.time+batch_len))
+
+
+
+
+f = statistics.SampleStatistic()
+spread = statistics.TimeWeightedStatistic()
+cancels = statistics.Counter()
+rejects = statistics.Counter()
+rate_log = []
 
 book = Book(0)
 
@@ -176,10 +221,18 @@ action = core.Event(0.0)
 action.execute = arrival
 sim = core.Simulation()
 sim.schedule(action)
+sim.schedule(Batch(batch_len))
 
-sim.schedule(core.StopSimulation(100))
+sim.schedule(core.StopSimulation(100000))
 
 sim.run()
 
-print("mean - " + str(s.mean()))
-print(s.variance())
+
+for name, b_stat in [("fill", batch_f), ("cancels", batch_cancels), ("rejects", batch_rejects), ("spread", batch_spread)]:
+
+    mean = b_stat.mean()
+
+    lo, hi =  b_stat.confidence_interval(0.95)
+    relation = (hi  - lo) / 2 / abs(mean) if mean  else float("inf")
+    print(f"{name} mean: {mean:.3f}, (lohi):{lo,hi} confidence: {relation:.3f}")
+
