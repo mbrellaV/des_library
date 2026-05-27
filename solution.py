@@ -207,13 +207,17 @@ class Batch(core.Event):
         sim.schedule(Batch(self.time+batch_len))
 
 
-
+class Sample(core.Event):
+    def execute(self, sim):
+        mid_log.append(book.mid_price)
+        sim.schedule(Sample(self.time + 1))
 
 f = statistics.SampleStatistic()
 spread = statistics.TimeWeightedStatistic()
 cancels = statistics.Counter()
 rejects = statistics.Counter()
 rate_log = []
+mid_log = []
 
 book = Book(0)
 
@@ -222,6 +226,7 @@ action.execute = arrival
 sim = core.Simulation()
 sim.schedule(action)
 sim.schedule(Batch(batch_len))
+sim.schedule(Sample(0))
 
 sim.schedule(core.StopSimulation(100000))
 
@@ -234,5 +239,73 @@ for name, b_stat in [("fill", batch_f), ("cancels", batch_cancels), ("rejects", 
 
     lo, hi =  b_stat.confidence_interval(0.95)
     relation = (hi  - lo) / 2 / abs(mean) if mean  else float("inf")
-    print(f"{name} mean: {mean:.3f}, (lohi):{lo,hi} confidence: {relation:.3f}")
+    print(f"{name} mean: {mean:.3f}, (lo hi):{lo,hi} confidence: {relation:.3f}")
 
+rs = []
+
+for i in range(len(mid_log) -1):
+    a, b = mid_log[i], mid_log[i+1]
+    if a > 0 and b > 0 and a!=b:
+        rs.append(math.log(b / a))
+
+mu = sum(rs) / len(rs)
+volatility = math.sqrt(sum((r - mu)**2 for r in rs) / len(rs))
+print("volatility: " + str(volatility))
+
+
+
+
+# verify
+print("verification block")
+
+def verify(m):
+    if m == 1:
+        th = 2
+    else:
+        th = 1.5
+
+    arrival_rate = 0.5
+    service_rate = 1
+
+    reps = statistics.SampleStatistic()
+
+    for seed in range(20):
+        random.seed(seed)
+        q = []
+        sj = statistics.SampleStatistic()
+
+        sim_verify =  core.Simulation()
+
+        def nexts():
+            return 1 / service_rate if m == 2 else random.expovariate(service_rate)
+
+        class Arrival(core.Event):
+            def execute(self, sim):
+                empty = not q
+
+                q.append(self.time)
+
+                if empty:
+                    sim.schedule(Dep(self.time + nexts()))
+                sim.schedule(Arrival(self.time + random.expovariate(arrival_rate)))
+
+
+        class Dep(core.Event):
+            def execute(self, sim):
+                sj.record(self.time -  q.pop(0))
+
+                if q:
+                    sim.schedule(Dep(self.time + nexts()))
+
+        sim_verify.schedule(Arrival(random.expovariate(arrival_rate)))
+        sim_verify.schedule(core.StopSimulation(5000))
+        sim_verify.run()
+        reps.record(sj.mean())
+
+
+    lo, hi =  reps.confidence_interval(0.95)
+    mod = "V2(M/D/1)" if m == 2 else "V1 (M/M/1)"
+    print(f"{mod} sim: {reps.mean():.3f}, (CI):{lo,hi} theory: {th:.3f}")
+
+verify(1)
+verify(2)
