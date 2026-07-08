@@ -72,7 +72,7 @@ class Booking:
             if dp:
                 layers.append([t for t in slot_times if dp[0] <= t < dp[1]])
 
-        base = [t for layer in layers for t in layer]
+        base = list(slot_times)
 
         self.calendar = {}
 
@@ -165,6 +165,17 @@ class Department:
 
         self.number_under = 0
         self.total_scanned = 0
+        self.wait_emergency = statistics.SampleStatistic()
+        self.wait_outpatient = statistics.SampleStatistic()
+        self.patients_outside_room = 0
+        self.total_arrivals = 0
+        self.last_time_update = 0
+        self.busy_time_office = 0
+        self.busy_time_outside_office = 0
+        self.free_time_office = 0
+        self.free_time_outside_office = 0
+
+
 
         self.utilization = statistics.TimeWeightedStatistic()
         self.wait = statistics.SampleStatistic()
@@ -204,6 +215,11 @@ class Department:
             return self.outpatients.pop(0)
 
     def admit(self, time_now, patient, q):
+        if time_now >= 24*60:
+            self.total_arrivals += 1
+            if len(self.emergency) + len(self.inpatients) + len(self.outpatients) >= 3:
+                self.patients_outside_room += 1
+
         q.append(patient)
         self.start_scan(time_now)
 
@@ -216,12 +232,13 @@ class Department:
             if s is None:
                 return
 
-            patient = self.choose_next(time_now)
+            patient = self.choose_next()
 
             if patient is None:
                 return
 
             s.busy = True
+            self.record_busy(time_now)
             self.busy_count += 1
             self.utilization.update(time_now, self.busy_count)
             self.record(time_now, patient)
@@ -246,6 +263,14 @@ class Department:
         if time_now < 24 * 60:
             return
 
+        waiting_time = time_now - patient.arrival_time
+
+        if patient.kind == "emergency":
+            self.wait_emergency.record(waiting_time)
+        elif patient.kind == "outpatient":
+            self.wait_outpatient.record(waiting_time)
+
+
         if patient.kind == "inpatient":
             req = patient.request_time
             req_t = req % (24 * 60)
@@ -262,6 +287,24 @@ class Department:
         if time_now - patient.arrival_time < 20:
             self.number_under += 1
         self.total_scanned += 1
+
+    def record_busy(self, time_now):
+        dt = time_now - self.last_time_update
+        minute = day_time(self.last_time_update)
+
+        open_scanners = 0
+        for s in self.scanners:
+            if s.open:
+                open_scanners+=1
+
+        if is_weekday(int(self.last_time_update // (24*60))) and FULL_DAY[0] <= minute < FULL_DAY[1]:
+            self.busy_time_office += self.busy_count * dt
+            self.free_time_office += open_scanners * dt
+        else:
+            self.busy_time_outside_office += self.busy_count * dt
+            self.free_time_outside_office += open_scanners * dt
+
+        self.last_time_update = time_now
 
 class EmergencyArrival(core.Event):
     def __init__(self, time, dept):
@@ -300,6 +343,7 @@ class OpenScanner(core.Event):
 
 
     def execute(self, simulation):
+        self.model.record_busy(self.time)
         self.scanner.open = True
         self.scanner.close_time = self.close_time
 
@@ -310,6 +354,8 @@ class CloseScanner(core.Event):
         self.scanner = scanner
 
     def execute(self, simulation):
+        self.model.record_busy(self.time)
+
         if not self.scanner.always_open:
             self.scanner.open = False
 
@@ -348,6 +394,8 @@ class ScanCompletion(core.Event):
 
     def execute(self, sim):
         self.scanner.busy = False
+        self.dept.record_busy(self.time)
+
         self.dept.busy_count -= 1
         self.dept.utilization.update(self.time, self.dept.busy_count)
         self.dept.start_scan(self.time)
@@ -376,10 +424,7 @@ def run(blueprint):
         random.seed(s)
         sim = core.Simulation()
 
-        scanners = [Scanner(0, always_open=True)]
-
-        for k in range(len(blueprint)):
-            scanners.append(Scanner(k+1, always_open=False))
+        scanners = [Scanner(0, always_open=True), Scanner(1, always_open=False)]
 
         d = Department(sim, scanners)
 
@@ -389,22 +434,11 @@ def run(blueprint):
 
             base = day * 24 * 60
 
-            for k, dn in enumerate(blueprint):
-                if dn is None:
-                    continue
-
-                start, finish = dn
-                sc = scanners[k+1]
-
-                sim.schedule(OpenScanner(base + start, d, sc, base + finish))
-                sim.schedule(CloseScanner(base + finish, d, sc, base + finish))
-
-            # sim.schedule(OpenScanner(open_time, d, scanners[2], close_time))
-            # sim.schedule(CloseScanner(close_time, d, scanners[2], close_time))
+            sim.schedule(OpenScanner(base + FULL_DAY[0], d, scanners[1], base + FULL_DAY[1]))
+            sim.schedule(CloseScanner(base + FULL_DAY[1], d, scanners[1], base + FULL_DAY[1]))
 
         sim.schedule(EmergencyArrival(0, d))
         sim.schedule(InpatientRequest(FULL_DAY[0], d))
-
 
         booking = Booking(outpatients_table, blueprint=blueprint, ndays=N_DAYS, warmup=24 * 60)
         sim.schedule(OutpatientCall(next_call_time(0), d, booking))
@@ -414,32 +448,36 @@ def run(blueprint):
         sim.run()
 
         time = sim.current_time
-        scanned.append(d.scanned)
-        wait.append(d.wait.mean())
-        uti.append(d.utilization.mean(time))
+        d.record_busy(time)
+
         ma.append(booking.access.mean())
         inps.append(d.inpatient_late / d.inpatient_total_during_office)
-        interval.append(d.number_under / d.total_scanned)
+
+        utilization_in_office_hours.append(d.busy_time_office / d.free_time_office)
+        utilization_in_outside_hours.append(d.busy_time_outside_office / d.free_time_outside_office)
+        wait_emergency_means.append(d.wait_emergency.mean())
+        wait_outpatient_means.append(d.wait_outpatient.mean())
+        fraction_outside_room.append(d.patients_outside_room / d.total_arrivals)
+
+    for metric_name, samples in [
+        ("utilization_office", utilization_in_office_hours),
+        ("utilization_outside", utilization_in_outside_hours),
+        ("access_time_days", ma),
+        ("wait_emergency", wait_emergency_means),
+        ("wait_outpatient", wait_outpatient_means),
+        ("fraction_outside_room", fraction_outside_room),
+        ("inpatient_late", inps)]:
+
+        number_of_runs = len(samples)
+        mean = sum(samples) / number_of_runs
+        variance = sum((x - mean) ** 2 for x in samples) / (number_of_runs - 1)
+        hw = 1.96 * math.sqrt(variance / number_of_runs)
+        print(metric_name, mean, hw, )
 
     return scanned, wait, uti,interval,ma, inps
 
 def experiment():
-    morning = (8*60, 12*60)
-    afternoon = (12*60, 16*60)
-    full = (8*60, 16*60)
-    parts = {"closed": None, "morning": morning, "afternoon": afternoon, "full": full}
-    names = ["closed", "morning", "afternoon", "full"]
-
-
-    print("fifo")
-    for iname in range(len(names)):
-        for j in range(iname, len(names)):
-            bl = [parts[names[iname]], parts[names[j]]]
-            print(bl)
-            scanned, wait, uti,sla,acc, inp, mn = run(bl)
-            print(sum(scanned) / len(scanned), sum(wait) / len(wait), sum(uti) / len(uti), sum(sla) / len(sla),
-                  sum(acc) / len(acc), sum(inp) / len(inp))
-
+    run([FULL_DAY])
 
 if __name__ == "__main__":
     experiment()
