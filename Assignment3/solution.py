@@ -472,7 +472,7 @@ def run(blueprint):
         mean = sum(samples) / number_of_runs
         variance = sum((x - mean) ** 2 for x in samples) / (number_of_runs - 1)
         hw = 1.96 * math.sqrt(variance / number_of_runs)
-        print(metric_name, mean, hw, )
+        print(metric_name, mean, hw, mean - hw, mean + hw)
 
     return scanned, wait, uti,interval,ma, inps
 
